@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>ルナの針メーター</title>
+<style>
+/* クラシック計器: 黒文字盤・太い白数字・白目盛り・赤い針・黒いハブ。トラックのメーターと同じ読み方 */
+:root{
+  --bg:#000; --face:#0b0b0c; --tick:#f4f4f2; --dim:#8a8f94; --needle:#ff2a1a; --lamp:#ff3b30;
+  --num:"Roboto Condensed","sans-serif-condensed","Arial Narrow",system-ui,sans-serif;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--tick);font-family:system-ui,"Noto Sans JP",sans-serif}
+body{display:flex;flex-direction:column;
+  padding:env(safe-area-inset-top,0px) max(8px,env(safe-area-inset-right,0px)) env(safe-area-inset-bottom,0px) max(8px,env(safe-area-inset-left,0px));
+  -webkit-user-select:none;user-select:none;overflow:hidden}
+.wrap{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;min-width:0}
+canvas{display:block}
+.bar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:6px 0 10px}
+button{font:600 15px system-ui,sans-serif;color:var(--tick);background:#161718;border:1px solid #2b2d30;border-radius:8px;padding:10px 14px;min-height:44px}
+button.main{background:#f4f4f2;color:#000;border-color:#f4f4f2}
+button.main[aria-pressed="true"]{background:#161718;color:var(--dim);border-color:#2b2d30}
+button:focus-visible{outline:3px solid var(--needle);outline-offset:2px}
+.msg{font-size:13px;color:var(--dim);text-align:center;min-height:18px;padding-bottom:4px}
+@media (orientation:landscape){ body{flex-direction:row} .side{display:flex;flex-direction:column;justify-content:center;gap:8px;padding:0 6px} .bar{flex-direction:column;padding:0} }
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap"><canvas id="dial" aria-label="スピードメーター"></canvas></div>
+<div class="side">
+  <div class="bar">
+    <button id="start" class="main">メーターを動かす</button>
+    <button id="limit" aria-label="警告する速度の切り替え">警告 60</button>
+    <button id="reset">トリップ 0</button>
+  </div>
+  <div class="msg" id="msg">純正メーターの補助として使ってください</div>
+</div>
+
+<script>
+(function(){
+  var MAX = 100, LIMITS = [30,40,50,60], limitIdx = 3;
+  var target = 0, shown = 0, trip = 0, last = null, acc = null, gpsOk = false, watchId = null;
+  var cv = document.getElementById('dial'), cx = cv.getContext('2d'), wrap = document.getElementById('wrap');
+  var msg = document.getElementById('msg'), NUM = getComputedStyle(document.documentElement).getPropertyValue('--num');
+  try { var s = localStorage.getItem('luna-limit'); if (s !== null && LIMITS[+s]) limitIdx = +s; } catch(e) {}
+  function limit(){ return LIMITS[limitIdx]; }
+  document.getElementById('limit').textContent = '警告 ' + limit();
+
+  function size(){
+    var r = wrap.getBoundingClientRect(), d = Math.min(r.width, r.height), dpr = window.devicePixelRatio || 1;
+    cv.style.width = cv.style.height = d + 'px';
+    cv.width = cv.height = Math.round(d * dpr);
+  }
+  window.addEventListener('resize', size);
+
+  // 0km/h を左下(225°)、100km/h を右下(-45°)。トラックと同じ時計回りの270°
+  function ang(v){ return (225 - 270 * Math.min(Math.max(v,0),MAX) / MAX) * Math.PI / 180; }
+  function pt(a, r, o){ return [o + Math.cos(a)*r, o - Math.sin(a)*r]; }
+
+  function draw(){
+    var W = cv.width, o = W/2, R = W/2 * 0.97;
+    cx.clearRect(0,0,W,W);
+    // 外周リング（メッキ風の細い縁）と文字盤
+    cx.beginPath(); cx.arc(o,o,R,0,Math.PI*2); cx.fillStyle = '#2a2c2e'; cx.fill();
+    cx.beginPath(); cx.arc(o,o,R*0.96,0,Math.PI*2); cx.fillStyle = '#0b0b0c'; cx.fill();
+
+    // 目盛り: 10km/hごとに太く長く、5km/hで中、1km/hは省いて見やすさ優先
+    for (var v=0; v<=MAX; v+=5){
+      var a = ang(v), big = v%10===0, p1 = pt(a, R*0.9, o), p2 = pt(a, R*(big?0.74:0.81), o);
+      cx.beginPath(); cx.moveTo(p1[0],p1[1]); cx.lineTo(p2[0],p2[1]);
+      cx.lineWidth = R*(big?0.03:0.016); cx.lineCap='butt'; cx.strokeStyle = '#f4f4f2'; cx.stroke();
+      if (big){
+        var t = pt(a, R*0.58, o);
+        cx.fillStyle = '#f4f4f2'; cx.font = '700 ' + Math.round(R*0.15) + 'px ' + NUM;
+        cx.textAlign='center'; cx.textBaseline='middle'; cx.fillText(v, t[0], t[1]);
+      }
+    }
+    // 警告速度の位置に小さな赤い三角
+    var la = ang(limit()), q = pt(la, R*0.93, o), q1 = pt(la+0.035, R*0.985, o), q2 = pt(la-0.035, R*0.985, o);
+    cx.beginPath(); cx.moveTo(q[0],q[1]); cx.lineTo(q1[0],q1[1]); cx.lineTo(q2[0],q2[1]); cx.closePath();
+    cx.fillStyle = '#ff2a1a'; cx.fill();
+
+    // 単位
+    cx.fillStyle = '#f4f4f2'; cx.font = '600 ' + Math.round(R*0.09) + 'px ' + NUM;
+    cx.textAlign='center'; cx.textBaseline='middle'; cx.fillText('km/h', o, o - R*0.3);
+
+    // ODO風の白いトリップ窓
+    var bw = R*0.5, bh = R*0.14, bx = o - bw/2, by = o + R*0.46;
+    cx.fillStyle = '#e9e6dd'; cx.fillRect(bx, by, bw, bh);
+    cx.fillStyle = '#111'; cx.font = '600 ' + Math.round(R*0.06) + 'px ' + NUM; cx.textAlign='left';
+    cx.fillText('TRIP', bx + bw*0.06, by + bh/2);
+    cx.font = '700 ' + Math.round(R*0.1) + 'px ' + NUM; cx.textAlign='right';
+    cx.fillText((trip/1000).toFixed(1) + ' km', bx + bw*0.94, by + bh/2 + R*0.005);
+
+    // 警告灯（超えたら赤く点灯）とGPSランプ
+    var over = gpsOk && shown > limit() + 0.5;
+    cx.beginPath(); cx.arc(o - R*0.12, o + R*0.75, R*0.035, 0, Math.PI*2);
+    cx.fillStyle = over ? '#ff3b30' : '#2a1514'; cx.fill();
+    cx.beginPath(); cx.arc(o + R*0.12, o + R*0.75, R*0.035, 0, Math.PI*2);
+    cx.fillStyle = !gpsOk ? '#1c1d1e' : (acc !== null && acc > 30 ? '#c98a10' : '#2bb36a'); cx.fill();
+    cx.fillStyle = '#8a8f94'; cx.font = '600 ' + Math.round(R*0.045) + 'px ' + NUM; cx.textAlign='center';
+    cx.fillText('OVER', o - R*0.12, o + R*0.84); cx.fillText('GPS', o + R*0.12, o + R*0.84);
+
+    // 赤い針と黒いハブ
+    var na = ang(shown);
+    cx.save(); cx.translate(o,o); cx.rotate(-na);
+    cx.beginPath(); cx.moveTo(-R*0.16, -R*0.03); cx.lineTo(R*0.86, -R*0.009); cx.lineTo(R*0.86, R*0.009); cx.lineTo(-R*0.16, R*0.03); cx.closePath();
+    cx.fillStyle = '#ff2a1a'; cx.fill(); cx.restore();
+    cx.beginPath(); cx.arc(o,o,R*0.1,0,Math.PI*2); cx.fillStyle = '#050505'; cx.fill();
+    cx.lineWidth = R*0.012; cx.strokeStyle = '#3a3c3f'; cx.stroke();
+  }
+
+  // GPSは約1秒ごとにしか値が来ない。直近の加速・減速の勢いから「今の速度」を予測して目標を連続的に動かし、
+  // 針はその目標をばねのように追いかける。値の間隔がばらついても針が止まって待たない（カクカク対策 v3）。
+  var fixV = 0, fixT = 0, slope = 0, avgGap = 1000, lastFrame = performance.now();
+  function newTarget(v){
+    var now = performance.now();
+    if (fixT){
+      var gap = now - fixT;
+      if (gap > 150 && gap < 4000){
+        avgGap = avgGap*0.7 + gap*0.3;
+        var sl = (v - fixV) / gap;                    // km/h per ms
+        sl = Math.max(-0.015, Math.min(0.015, sl));    // 最大 ±15km/h/秒
+        slope = slope*0.4 + sl*0.6;
+      }
+    }
+    fixV = v; fixT = now;
+  }
+  (function loop(){
+    var now = performance.now(), dt = Math.min(now - lastFrame, 100); lastFrame = now;
+    var ahead = Math.min(now - fixT, avgGap * 1.5);
+    var pred = fixT ? fixV + slope * ahead : 0;
+    pred = Math.max(0, Math.min(MAX + 5, pred));
+    shown += (pred - shown) * (1 - Math.exp(-dt / 220));
+    draw(); requestAnimationFrame(loop);
+  })();
+
+  function dist(a,b){ var R=6371000,t=Math.PI/180,x=(b.lat-a.lat)*t,y=(b.lon-a.lon)*t;
+    var s=Math.sin(x/2)*Math.sin(x/2)+Math.cos(a.lat*t)*Math.cos(b.lat*t)*Math.sin(y/2)*Math.sin(y/2); return 2*R*Math.asin(Math.sqrt(s)); }
+
+  function onPos(p){
+    var c = p.coords, now = {lat:c.latitude, lon:c.longitude, t:p.timestamp}, kmh = null;
+    acc = c.accuracy; gpsOk = true;
+    if (c.speed !== null && !isNaN(c.speed)) kmh = c.speed * 3.6;
+    if (last){ var d = dist(last, now), dt = (now.t-last.t)/1000;
+      if (kmh === null && dt > 0) kmh = d/dt*3.6;
+      if (c.accuracy < 50 && d < 200) trip += d; }
+    last = now;
+    if (kmh !== null){
+      kmh = kmh < 2 ? 0 : Math.min(kmh, MAX + 5);
+      // GPSの飛び値を抑える: 1回で動く量は最大20km/hまで
+      if (gpsOk && Math.abs(kmh - target) > 20) kmh = target + Math.sign(kmh - target) * 20;
+      target = kmh; newTarget(kmh);
+    }
+    msg.textContent = 'v3 ・ 更新 ' + (1000/avgGap).toFixed(1) + '回/秒 ・ ' + (acc > 30 ? 'GPS弱め' : 'GPS良好');
+  }
+  function onErr(e){ gpsOk = false;
+    msg.textContent = e.code === 1 ? '位置情報がブロックされています（httpsのアドレスで開いてください）' : 'GPSを探しています。空が見える場所で待ってください'; }
+
+  async function awake(){ try { if ('wakeLock' in navigator) await navigator.wakeLock.request('screen'); } catch(e) {} }
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState==='visible' && watchId!==null) awake(); });
+
+  document.getElementById('start').addEventListener('click', function(){
+    if (!('geolocation' in navigator)) { msg.textContent = 'この端末では位置情報が使えません'; return; }
+    if (watchId !== null) return;
+    watchId = navigator.geolocation.watchPosition(onPos, onErr, {enableHighAccuracy:true, maximumAge:0, timeout:15000});
+    awake(); this.textContent = '計測中'; this.setAttribute('aria-pressed','true'); msg.textContent = 'GPSを探しています…';
+  });
+  document.getElementById('limit').addEventListener('click', function(){
+    limitIdx = (limitIdx+1) % LIMITS.length; this.textContent = '警告 ' + limit();
+    try { localStorage.setItem('luna-limit', String(limitIdx)); } catch(e) {}
+  });
+  document.getElementById('reset').addEventListener('click', function(){ trip = 0; });
+
+  size();
+})();
+</script>
+</body>
+</html>
